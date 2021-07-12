@@ -53,6 +53,7 @@ const uint32_t MICRO_SEC_TO_CM_DIVIDER = 58; // sound speed 340M/S, 2 times back
 
 
 const uint16_t MEDIAN_DISTANCE_MEASURES = 3;
+const uint16_t MAX_SAMPLE_DISTANCE_DEVIATION = 10;
 const uint16_t MAX_NUMBER_MEASUREMENTS_PER_INTERVAL = 35; //  is 1000/SENSOR_QUIET_PERIOD_AFTER_START_MICRO_SEC
 extern const uint16_t MAX_SENSOR_VALUE;
 
@@ -132,6 +133,7 @@ class HCSR04SensorManager {
     static uint32_t microsBetween(uint32_t a, uint32_t b);
     static uint32_t microsSince(uint32_t a);
     static uint16_t millisSince(uint16_t milliseconds);
+    static uint16_t range(uint16_t values[], uint16_t size);
     static void updateStatistics(HCSR04SensorInfo * const sensor);
     uint16_t startReadingMilliseconds = 0;
     uint8_t primarySensor = 1;

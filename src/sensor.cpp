@@ -320,8 +320,10 @@ bool HCSR04SensorManager::collectSensorResult(uint8_t sensorId) {
   }
   sensor->rawDistance = dist;
   sensor->median->addValue(dist);
-  sensorValues[sensorId] =
-    sensor->distance = correctSensorOffset(medianMeasure(sensor, dist), sensor->offset);
+  uint16_t distance = medianMeasure(sensor, dist);
+  if (MAX_SAMPLE_DISTANCE_DEVIATION > range(sensor->distances, MEDIAN_DISTANCE_MEASURES))
+    sensorValues[sensorId] =
+      sensor->distance = correctSensorOffset(distance, sensor->offset);
 
   log_v("Raw sensor[%d] distance read %03u / %03u (%03u, %03u, %03u) -> *%03ucm*, duration: %zu us - echo pin state: %d",
     sensorId, sensor->rawDistance, dist, sensor->distances[0], sensor->distances[1],
@@ -471,4 +473,19 @@ uint16_t HCSR04SensorManager::median(uint16_t a, uint16_t b, uint16_t c) {
     }
   }
   return c;
+}
+
+
+uint16_t HCSR04SensorManager::range(uint16_t values[], uint16_t size) {
+  uint16_t minval = values[0];
+  uint16_t maxval = values[0];
+  for (uint16_t i = 1; i<size; ++i) {
+    if (values[i]<minval) {
+      minval = values[i];
+    }
+    if (values[i] > maxval) {
+      maxval = values[i];
+    }
+  }
+  return maxval - minval;
 }
