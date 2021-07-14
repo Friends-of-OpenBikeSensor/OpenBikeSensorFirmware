@@ -56,6 +56,7 @@ static const uint32_t MAX_TIMEOUT_MICRO_SEC = 75000;
 /* To avoid that we receive a echo from a former measurement, we do not
  * start a new measurement within the given time from the start of the
  * former measurement of the opposite sensor.
+ * TODO: This can lead to the situation that we only poll the primary sensor for a while!
  */
 static const uint32_t SENSOR_QUIET_PERIOD_AFTER_OPPOSITE_START_MICRO_SEC = 50 * 1000;
 
@@ -70,7 +71,7 @@ static const uint32_t SENSOR_QUIET_PERIOD_AFTER_END_MICRO_SEC = 10 * 1000;
    - With 30ms I could get stable readings down to 25/35cm only (new sensor)
    - It looked fine with the old sensor for all values
  */
-static const uint32_t SENSOR_QUIET_PERIOD_AFTER_START_MICRO_SEC = 30 * 1000;
+static const uint32_t SENSOR_QUIET_PERIOD_AFTER_START_MICRO_SEC = 32 * 1000;
 
 /* Value of HCSR04SensorInfo::end during an ongoing measurement. */
 static const uint32_t MEASUREMENT_IN_PROGRESS = 0;
@@ -210,12 +211,12 @@ bool HCSR04SensorManager::pollDistancesParallel() {
   if (isReadyForStart(primarySensor)) {
     setSensorTriggersToLow();
     newMeasurements = collectSensorResults();
-    if (isReadyForStart(1 - primarySensor)) {
+    const bool secondSensorIsReady = isReadyForStart(1 - primarySensor);
+    sendTriggerToSensor(primarySensor);
+    if (secondSensorIsReady) {
+      delay(10);
       sendTriggerToSensor(1 - primarySensor);
     }
-    sendTriggerToSensor(primarySensor);
-    delayMicroseconds(20);
-    setSensorTriggersToLow();
   }
   return newMeasurements;
 }
@@ -231,16 +232,20 @@ void HCSR04SensorManager::sendTriggerToSensor(uint8_t sensorId) {
   HCSR04SensorInfo * const sensor = &(m_sensors[sensorId]);
   updateStatistics(sensor);
   sensor->end = MEASUREMENT_IN_PROGRESS; // will be updated with LOW signal
-  sensor->trigger = sensor->start = micros(); // will be updated with HIGH signal
   sensor->numberOfTriggers++;
   sensor->measurementRead = false;
+  sensor->trigger = sensor->start = micros(); // will be updated with HIGH signal
+  // do the wait per sensor here - some sensors might be sensible for to long
+  // trigger high time (not directly observed but could be cause for some issues)
   digitalWrite(sensor->triggerPin, HIGH);
+  delayMicroseconds(20);
+  digitalWrite(sensor->triggerPin, LOW);
 }
 
 /* Checks if the given sensor is ready for a new measurement cycle.
  */
 boolean HCSR04SensorManager::isReadyForStart(uint8_t sensorId) {
-  const HCSR04SensorInfo * const sensor = &m_sensors[sensorId];
+  HCSR04SensorInfo * const sensor = &m_sensors[sensorId];
   boolean ready = false;
   const uint32_t now = micros();
   const uint32_t start = sensor->start;
@@ -254,10 +259,10 @@ boolean HCSR04SensorManager::isReadyForStart(uint8_t sensorId) {
     }
     if (digitalRead(sensor->echoPin) != LOW) {
       log_e("Measurement done, but echo pin is high for %s sensor", sensor->sensorLocation);
+      sensor->numberOfLowAfterMeasurement++;
     }
-
-
   } else if (microsBetween(now, start) > 2 * MAX_TIMEOUT_MICRO_SEC) {
+    sensor->numberOfToLongMeasurement++;
     // signal or interrupt was lost altogether this is an error,
     // should we raise it?? Now pretend the sensor is ready, hope it helps to give it a trigger.
     ready = true;
@@ -285,6 +290,14 @@ bool HCSR04SensorManager::collectSensorResults() {
 
 void HCSR04SensorManager::registerReadings() {
   startOffsetMilliseconds[lastReadingCount] = millisSince(startReadingMilliseconds);
+  // secondary sensor was not captured
+  if (m_sensors[1 - primarySensor].echoDurationMicroseconds[lastReadingCount] == 0) {
+    m_sensors[1 - primarySensor].echoDurationMicroseconds[lastReadingCount] = -1;
+    sensorValues[1 - primarySensor] = MAX_SENSOR_VALUE;
+    m_sensors[1 - primarySensor].rawDistance = MAX_SENSOR_VALUE;
+    m_sensors[1 - primarySensor].distance = MAX_SENSOR_VALUE;
+    m_sensors[1 - primarySensor].median->addValue(MAX_SENSOR_VALUE);
+  }
   if (lastReadingCount < MAX_NUMBER_MEASUREMENTS_PER_INTERVAL - 1) {
     lastReadingCount++;
   }
@@ -355,25 +368,34 @@ uint32_t HCSR04SensorManager::getNoSignalReadings(const uint8_t sensorId) {
   return m_sensors[sensorId].numberOfNoSignals;
 }
 
+uint32_t HCSR04SensorManager::getNumberOfLowAfterMeasurement(const uint8_t sensorId) {
+  return m_sensors[sensorId].numberOfLowAfterMeasurement;
+}
+
+uint32_t HCSR04SensorManager::getNumberOfToLongMeasurement(const uint8_t sensorId) {
+  return m_sensors[sensorId].numberOfToLongMeasurement;
+}
+
+uint32_t HCSR04SensorManager::getNumberOfInterruptAdjustments(const uint8_t sensorId) {
+  return m_sensors[sensorId].numberOfInterruptAdjustments;
+}
+
 /* During debugging I observed readings that did not get `start` updated
  * By the interrupt. Since we also set start when we send the pulse to the
  * sensor this adds 300 microseconds or 5 centimeters to the measured result.
  * After research, is a bug in the ESP!? See https://esp32.com/viewtopic.php?t=10124
  */
 uint32_t HCSR04SensorManager::getFixedStart(
-  size_t idx, const HCSR04SensorInfo * const sensor) {
+  size_t idx, HCSR04SensorInfo * const sensor) {
   uint32_t start = sensor->start;
   // the error appears if both sensors trigger the interrupt at the exact same
   // time, if this happens, trigger time == start time
   if (sensor->trigger == sensor->start) {
-    for (size_t idx2 = 0; idx2 < NUMBER_OF_TOF_SENSORS; ++idx2) {
-      if (idx2 != idx) {
-        // it should be save to use the start value from the other sensor.
-        const uint32_t alternativeStart = m_sensors[idx2].start;
-        if (microsBetween(alternativeStart, start) < 500) { // typically 290-310 microseconds {
-          start = alternativeStart;
-        }
-      }
+    // it should be save to use the start value from the other sensor.
+    const uint32_t alternativeStart = m_sensors[1 - idx].start;
+    if (microsBetween(alternativeStart, start) < 500) { // typically 290-310 microseconds {
+      start = alternativeStart;
+      sensor->numberOfInterruptAdjustments++;
     }
   }
   return start;
